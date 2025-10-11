@@ -231,11 +231,12 @@ def format_euro(x: float, lang_code: str = "en"):
 def make_animation(
     dates, prices, snapshots, title, subtitle, outfile,
     fps=30, speed=1.0, dpi=100, lang=None,
-    freeze_hold_sec=0.0  # kept but ignored for the 60s reveal schedule
+    reveal_sec=60.0,
+    freeze_hold_sec=0.0,  # kept but ignored for the reveal schedule
 ):
     """
-    Plots the data continuously for EXACTLY 60 seconds (line reveals for the whole minute),
-    then shows a 2-second end card (CTA + handle). Total ≈ 62s.
+    Plots the data continuously for the requested duration (``reveal_sec`` seconds),
+    then shows a 2-second end card (CTA + handle).
     Now with DYNAMIC Y-AXIS (updates every frame with padding).
     Legend removed. Labels visible from frame 1 (follow -> pin at 0.70).
     Dynamic x-axis growth, lowered top text, extra margins, watermark, gain/loss.
@@ -267,8 +268,8 @@ def make_animation(
     WATERMARK_ALPHA = 0.25
     BG           = "#0b0f14"
     CTA_TEXT     = "Tu veux que je teste quoi ensuite ?"
-    REVEAL_SEC   = 60.0                        # <-- line reveals for full minute
-    ENDCARD_SEC  = 2.0                         # 2s end card (total ≈ 62s)
+    reveal_sec = max(float(reveal_sec), 1.0)    # <-- line reveals for chosen duration
+    ENDCARD_SEC  = 2.0                         # 2s end card shown after the reveal
 
     # ---- Dynamic axes ----
     # X: grow visible span as the animation progresses
@@ -298,8 +299,8 @@ def make_animation(
     invested_series = np.array([s.invested for s in snapshots], dtype=float)
     value_series    = np.array([s.value    for s in snapshots], dtype=float)
 
-    # ===== Frame schedule: 60s reveal + 2s end card =====
-    reveal_frames  = max(1, int(round(REVEAL_SEC * fps)))
+    # ===== Frame schedule: reveal + 2s end card =====
+    reveal_frames  = max(1, int(round(reveal_sec * fps)))
     endcard_frames = max(0, int(round(ENDCARD_SEC * fps)))
 
     # Map animation frames to data indices linearly across the dataset.
@@ -664,7 +665,18 @@ def main():
     parser.add_argument("--speed", type=float, default=1.0, help="Speed factor (>1 skips points)")
     parser.add_argument("--outfile", help="Output mp4 path (auto if omitted)")
     parser.add_argument("--lang", choices=["en", "fr"], default="en", help="UI language for overlays (en|fr)")
-    parser.add_argument("--freeze-sec", type=float, default=0.5, help="Extra hold on the last frame (seconds, included in 60–63s total)")
+    parser.add_argument(
+        "--reveal-sec",
+        type=float,
+        default=60.0,
+        help="Duration of the chart animation before the end screen (seconds)",
+    )
+    parser.add_argument(
+        "--freeze-sec",
+        type=float,
+        default=0.5,
+        help="Extra hold on the last frame (seconds, appended after the reveal)",
+    )
     args = parser.parse_args()
 
     lang = get_lang(args.lang)
@@ -722,6 +734,7 @@ def main():
     make_animation(
         vis_dates, vis_close, snapshots, title, subtitle, outfile,
         fps=args.fps, speed=args.speed, dpi=100, lang=lang,
+        reveal_sec=args.reveal_sec,
         freeze_hold_sec=args.freeze_sec
     )
     print(f"[OK] Saved: {outfile}")

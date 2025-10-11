@@ -10,7 +10,9 @@ from __future__ import annotations
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
+
+import re
 
 import pandas as pd
 import streamlit as st
@@ -64,6 +66,16 @@ def _format_currency(value: float, lang_code: str) -> str:
         return f"{value:,.2f}"
 
 
+def _slugify_name(name: str) -> str:
+    """Return a filesystem-safe slug for ``name`` suitable for downloads."""
+    if not name:
+        return "video"
+    slug = re.sub(r"\s+", "_", name.strip())
+    slug = re.sub(r"[^A-Za-z0-9_\-]", "_", slug)
+    slug = re.sub(r"_+", "_", slug).strip("_-")
+    return slug or "video"
+
+
 def _generate_video(
     prices: pd.DataFrame,
     company: str,
@@ -76,7 +88,8 @@ def _generate_video(
     speed: float,
     freeze_sec: float,
     lang_code: str,
-) -> Path:
+    reveal_duration: float,
+) -> Tuple[Path, pd.Timestamp]:
     lang = get_lang(lang_code)
 
     data = prices.copy()
@@ -127,9 +140,10 @@ def _generate_video(
         speed=speed,
         dpi=100,
         lang=lang,
+        reveal_sec=reveal_duration,
         freeze_hold_sec=freeze_sec,
     )
-    return output_path
+    return output_path, start_used
 
 
 def main() -> None:
@@ -208,6 +222,18 @@ def main() -> None:
     freeze_sec = st.sidebar.slider(
         "Freeze on last frame (s)", min_value=0.0, max_value=3.0, value=0.5, step=0.1
     )
+    duration_options = {
+        "20 seconds": 20.0,
+        "30 seconds": 30.0,
+        "60 seconds": 60.0,
+    }
+    duration_choice = st.sidebar.selectbox(
+        "Video duration (excludes end screen)",
+        options=list(duration_options.keys()),
+        index=2,
+        help="Select how long the chart animation should last before the end screen.",
+    )
+    reveal_duration = duration_options[duration_choice]
     lang_code = st.sidebar.selectbox("Language", options=["en", "fr"], index=0)
 
     generate_btn = st.sidebar.button("Generate video", type="primary")
@@ -224,7 +250,7 @@ def main() -> None:
             end_dt = datetime.combine(end_date, datetime.min.time()) if end_date else None
             try:
                 with st.spinner("Rendering video..."):
-                    video_path = _generate_video(
+                    video_path, start_used = _generate_video(
                         prices,
                         company,
                         mode,
@@ -236,9 +262,18 @@ def main() -> None:
                         speed,
                         freeze_sec,
                         lang_code,
+                        reveal_duration,
                     )
-                st.success(f"Video created: {video_path.name}")
+                download_filename = f"{_slugify_name(company)}_{mode}_{start_used.date().isoformat()}.mp4"
+                st.success(f"Video created: {download_filename}")
                 st.video(str(video_path))
+                with video_path.open("rb") as video_file:
+                    st.download_button(
+                        "Download video",
+                        data=video_file.read(),
+                        file_name=download_filename,
+                        mime="video/mp4",
+                    )
             except Exception as exc:
                 st.error(f"Failed to render video: {exc}")
 
