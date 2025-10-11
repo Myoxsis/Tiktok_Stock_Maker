@@ -153,6 +153,18 @@ def main() -> None:
         "Build eye-catching TikTok-ready stock performance videos by choosing your CSV, "
         "investment mode, and rendering parameters."
     )
+    st.markdown(
+        """
+        <style>
+            [data-testid="stVideo"] video {
+                width: min(420px, 100%) !important;
+                border-radius: 12px;
+                box-shadow: 0 12px 24px rgba(0, 0, 0, 0.25);
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.sidebar.header("Data source")
     csv_choice = st.sidebar.radio(
