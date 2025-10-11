@@ -28,6 +28,7 @@ LANGS = {
         "subtitle_dca": "You invest {amount} every {freq} since {date}",
         "label_invested": "Invested",
         "label_value": "Value",
+        "label_dividend": "Dividends",
         "label_shares": "Shares",
         "label_return": "Return",
         "axis_date": "Date",
@@ -57,6 +58,7 @@ LANGS = {
         "subtitle_dca": "Tu investi {amount} chaque {freq} depuis le {date}",
         "label_invested": "Investi",
         "label_value": "Valeur",
+        "label_dividend": "Dividendes",
         "label_shares": "Parts",
         "label_return": "Performance",
         "axis_date": "Date",
@@ -105,17 +107,42 @@ def display_freq_inline(lang: dict, freq_key: str):
 def load_prices(csv_path, date_col="Date", price_col="Close", tz_aware=False):
     df = pd.read_csv(csv_path)
     if date_col not in df.columns or price_col not in df.columns:
-        raise ValueError(f"CSV must have columns '{date_col}' and '{price_col}'. Found: {df.columns.tolist()}")
+        raise ValueError(
+            f"CSV must have columns '{date_col}' and '{price_col}'. Found: {df.columns.tolist()}"
+        )
 
-    df = df[[date_col, price_col]].copy()
+    dividend_col = "Dividend" if "Dividend" in df.columns else None
+
+    cols = [date_col, price_col]
+    if dividend_col:
+        cols.append(dividend_col)
+    df = df[cols].copy()
+
     df[date_col] = pd.to_datetime(df[date_col], utc=tz_aware, errors="coerce")
+    if dividend_col:
+        df[dividend_col] = pd.to_numeric(df[dividend_col], errors="coerce").fillna(0.0)
+
     df = df.dropna(subset=[date_col, price_col])
     df = df.sort_values(date_col).reset_index(drop=True)
     # Force datetime64[ns]
     df[date_col] = pd.DatetimeIndex(df[date_col])
-    # Deduplicate dates (keep last)
-    df = df.groupby(date_col, as_index=False).agg({price_col: "last"})
-    return df.rename(columns={date_col: "date", price_col: "close"})
+    # Deduplicate dates (keep last for price, sum dividends)
+    agg_map = {price_col: "last"}
+    if dividend_col:
+        agg_map[dividend_col] = "sum"
+    df = df.groupby(date_col, as_index=False).agg(agg_map)
+
+    rename_map = {date_col: "date", price_col: "close"}
+    if dividend_col:
+        rename_map[dividend_col] = "dividend"
+    df = df.rename(columns=rename_map)
+
+    if "dividend" not in df.columns:
+        df["dividend"] = 0.0
+    else:
+        df["dividend"] = df["dividend"].fillna(0.0)
+
+    return df
 
 def clamp_date_to_series(date, dates_like):
     dates_idx = pd.DatetimeIndex(dates_like)
@@ -148,6 +175,7 @@ class PortfolioSnapshot:
     invested: float
     value: float
     pnl_pct: float
+    dividends: float = 0.0
 
 # ---------------------------
 # Portfolio series
@@ -160,15 +188,20 @@ def series_fixed_investment(prices: pd.DataFrame, start_date: datetime, amount: 
 
     buy_price = prices.loc[start_idx, "close"]
     shares = 0.0 if buy_price == 0 else amount / buy_price
+    dividends = 0.0
 
     snapshots = []
     for i in range(start_idx, len(prices)):
         d = prices.loc[i, "date"]
         p = prices.loc[i, "close"]
+        div_per_share = float(prices.loc[i, "dividend"]) if "dividend" in prices.columns else 0.0
+        if div_per_share and shares > 0:
+            dividends += shares * div_per_share
         value = shares * p
         invested = amount
-        pnl_pct = 0.0 if invested == 0 else (value / invested - 1.0) * 100
-        snapshots.append(PortfolioSnapshot(d, p, shares, invested, value, pnl_pct))
+        total_value = value + dividends
+        pnl_pct = 0.0 if invested == 0 else (total_value / invested - 1.0) * 100
+        snapshots.append(PortfolioSnapshot(d, p, shares, invested, value, pnl_pct, dividends))
 
     vis_dates = prices.loc[start_idx:, "date"].to_numpy()
     vis_close = prices.loc[start_idx:, "close"].to_numpy()
@@ -190,6 +223,7 @@ def series_dca(prices: pd.DataFrame, start_date: datetime, amount_per: float, fr
 
     shares = 0.0
     invested = 0.0
+    dividends = 0.0
     snapshots = []
 
     for i in range(len(prices)):
@@ -200,10 +234,14 @@ def series_dca(prices: pd.DataFrame, start_date: datetime, amount_per: float, fr
             shares += amount_per / p
             invested += amount_per
 
+        div_per_share = float(prices.loc[i, "dividend"]) if "dividend" in prices.columns else 0.0
+        if div_per_share and shares > 0:
+            dividends += shares * div_per_share
         value = shares * p
-        pnl_pct = 0.0 if invested == 0 else (value / invested - 1.0) * 100
+        total_value = value + dividends
+        pnl_pct = 0.0 if invested == 0 else (total_value / invested - 1.0) * 100
         if d >= pd.Timestamp(start_date):
-            snapshots.append(PortfolioSnapshot(d, p, shares, invested, value, pnl_pct))
+            snapshots.append(PortfolioSnapshot(d, p, shares, invested, value, pnl_pct, dividends))
 
     vis_dates = np.array([s.date for s in snapshots])
     vis_close = np.array([s.price for s in snapshots])
@@ -298,6 +336,8 @@ def make_animation(
     # --- Series (EUR) ---
     invested_series = np.array([s.invested for s in snapshots], dtype=float)
     value_series    = np.array([s.value    for s in snapshots], dtype=float)
+    dividend_series = np.array([s.dividends for s in snapshots], dtype=float)
+    has_dividend    = np.any(np.abs(dividend_series) > 1e-9)
 
     # ===== Frame schedule: reveal + optional freeze + 2s end card =====
     reveal_frames  = max(1, int(round(reveal_sec * fps)))
@@ -428,6 +468,12 @@ def make_animation(
     (invest_line,) = ax.plot([], [], lw=2,  linestyle="--", color="#F7A072")
     (value_dot,)   = ax.plot([], [], "o", ms=8, color="#6CCFF6", zorder=5)
     (invest_dot,)  = ax.plot([], [], "o", ms=8, color="#F7A072", zorder=5)
+    if has_dividend:
+        (dividend_line,) = ax.plot([], [], lw=2.5, linestyle=":", color="#C084FC")
+        (dividend_dot,)  = ax.plot([], [], "o", ms=8, color="#C084FC", zorder=5)
+    else:
+        dividend_line = None
+        dividend_dot = None
 
     # Labels: FOLLOW + PIN (visible from frame 1)
     trans_right = blended_transform_factory(ax.transAxes, ax.transData)
@@ -451,6 +497,20 @@ def make_animation(
         color="#F7A072", fontsize=16, weight="bold", zorder=6, clip_on=False,
         bbox=dict(boxstyle="round,pad=0.2", fc=BG, ec="#F7A072", lw=1), visible=False
     )
+    if has_dividend:
+        dividend_label_follow = ax.text(
+            dates[0], 0, "", transform=ax.transData, ha="left", va="center",
+            color="#C084FC", fontsize=16, weight="bold", zorder=6, clip_on=True,
+            bbox=dict(boxstyle="round,pad=0.2", fc=BG, ec="#C084FC", lw=1), visible=False
+        )
+        dividend_label_pin = ax.text(
+            LABEL_X_FRAC, 0, "", transform=trans_right, ha="right", va="center",
+            color="#C084FC", fontsize=16, weight="bold", zorder=6, clip_on=False,
+            bbox=dict(boxstyle="round,pad=0.2", fc=BG, ec="#C084FC", lw=1), visible=False
+        )
+    else:
+        dividend_label_follow = None
+        dividend_label_pin = None
 
     # Progress bar + Gain/Loss
     pbar_ax = plt.axes(PBAR_RECT); pbar_ax.set_zorder(3)
@@ -488,6 +548,9 @@ def make_animation(
         invest_line.set_data([], [])
         value_dot.set_data([], [])
         invest_dot.set_data([], [])
+        if has_dividend:
+            dividend_line.set_data([], [])
+            dividend_dot.set_data([], [])
         pbar_fill.set_data([], [])
         pl_text.set_text("")
         end_bg.set_alpha(0.0); end_title.set_alpha(0.0); end_handle.set_alpha(0.0)
@@ -495,10 +558,18 @@ def make_animation(
         invest_label_follow.set_visible(False)
         value_label_pin.set_visible(False)
         invest_label_pin.set_visible(False)
-        return (value_line, invest_line, value_dot, invest_dot,
-                value_label_follow, invest_label_follow,
-                value_label_pin, invest_label_pin,
-                pbar_fill, pl_text, end_bg, end_title, end_handle)
+        if has_dividend:
+            dividend_label_follow.set_visible(False)
+            dividend_label_pin.set_visible(False)
+        artists = [
+            value_line, invest_line, value_dot, invest_dot,
+            value_label_follow, invest_label_follow,
+            value_label_pin, invest_label_pin,
+            pbar_fill, pl_text, end_bg, end_title, end_handle,
+        ]
+        if has_dividend:
+            artists.extend([dividend_line, dividend_dot, dividend_label_follow, dividend_label_pin])
+        return tuple(artists)
 
     def update(frame):
         mode, payload = frame
@@ -507,18 +578,29 @@ def make_animation(
             x  = dates[:k]
             yv = value_series[:k]
             yi = invested_series[:k]
+            if has_dividend:
+                yd = dividend_series[:k]
 
             value_line.set_data(x, yv)
             invest_line.set_data(x, yi)
+            if has_dividend:
+                dividend_line.set_data(x, yd)
 
             val_last  = float(yv[-1]); inv_last = float(yi[-1])
             x_last_ts = x[-1]
             x_last_ns = int(dates_ns[k - 1])
+            if has_dividend:
+                div_last = float(yd[-1])
 
             # ==== Dynamic Y-limits (from data up to k, with padding) ====
             if DYNAMIC_YLIM:
-                y_min_raw = float(np.nanmin([np.nanmin(yv), np.nanmin(yi)]))
-                y_max_raw = float(np.nanmax([np.nanmax(yv), np.nanmax(yi)]))
+                series_min = [np.nanmin(yv), np.nanmin(yi)]
+                series_max = [np.nanmax(yv), np.nanmax(yi)]
+                if has_dividend:
+                    series_min.append(np.nanmin(yd))
+                    series_max.append(np.nanmax(yd))
+                y_min_raw = float(np.nanmin(series_min))
+                y_max_raw = float(np.nanmax(series_max))
                 y_range   = max(y_max_raw - y_min_raw, 1e-9)
                 y_pad     = max(y_range * YPAD_FRAC, 1e-6)
                 y_min_cur = y_min_raw - y_pad
@@ -532,11 +614,15 @@ def make_animation(
 
             value_dot.set_data([x_last_ts], [val_last])
             invest_dot.set_data([x_last_ts], [inv_last])
+            if has_dividend:
+                dividend_dot.set_data([x_last_ts], [div_last])
 
             # Cushion for labels inside current y-lims
             cushion = max(y_range * CUSHION_FRAC, 1e-6)
             vy = float(np.clip(val_last, y_min_cur + cushion, y_max_cur - cushion))
             iy = float(np.clip(inv_last, y_min_cur + cushion, y_max_cur - cushion))
+            if has_dividend:
+                dy = float(np.clip(div_last, y_min_cur + cushion, y_max_cur - cushion))
 
             # Separate labels a bit vertically if too close
             if abs(vy - iy) < cushion * 1.2:
@@ -549,6 +635,18 @@ def make_animation(
                 else:
                     vy = max(vy - cushion * 0.6, y_min_cur + cushion)
                     iy = min(iy + cushion * 0.6, y_max_cur - cushion)
+            if has_dividend:
+                # Keep dividend label separated if it collides
+                if abs(dy - vy) < cushion * 0.8:
+                    if dy >= vy:
+                        dy = min(dy + cushion * 0.6, y_max_cur - cushion)
+                    else:
+                        dy = max(dy - cushion * 0.6, y_min_cur + cushion)
+                if abs(dy - iy) < cushion * 0.8:
+                    if dy >= iy:
+                        dy = min(dy + cushion * 0.6, y_max_cur - cushion)
+                    else:
+                        dy = max(dy - cushion * 0.6, y_min_cur + cushion)
 
             # ---- Dynamic x-axis growth ----
             if DYNAMIC_XLIM:
@@ -579,6 +677,10 @@ def make_animation(
             invest_label_follow.set_text(invested_txt)
             value_label_pin.set_text(value_text)
             invest_label_pin.set_text(invested_txt)
+            if has_dividend:
+                dividend_text = f"{lang['label_dividend']}: {format_euro(div_last)}"
+                dividend_label_follow.set_text(dividend_text)
+                dividend_label_pin.set_text(dividend_text)
 
             if frac < FOLLOW_TO_PIN_FRAC:
                 # SHOW FOLLOW labels from the very first point
@@ -586,6 +688,9 @@ def make_animation(
                 invest_label_follow.set_visible(True)
                 value_label_pin.set_visible(False)
                 invest_label_pin.set_visible(False)
+                if has_dividend:
+                    dividend_label_follow.set_visible(True)
+                    dividend_label_pin.set_visible(False)
 
                 value_label_follow.set_position((x_follow_ts, vy))
                 invest_label_follow.set_position((x_follow_ts, iy))
@@ -593,24 +698,49 @@ def make_animation(
                 invest_label_follow.set_ha("left")
                 value_label_follow.set_va("bottom" if vy >= iy else "top")
                 invest_label_follow.set_va("bottom" if iy >= vy else "top")
+                if has_dividend:
+                    dividend_label_follow.set_position((x_follow_ts, dy))
+                    dividend_label_follow.set_ha("left")
+                    ref_top = max(vy, iy)
+                    ref_bottom = min(vy, iy)
+                    if dy >= ref_top:
+                        dividend_label_follow.set_va("bottom")
+                    elif dy <= ref_bottom:
+                        dividend_label_follow.set_va("top")
+                    else:
+                        dividend_label_follow.set_va("center")
             else:
                 # Switch to PIN labels at the right edge
                 value_label_follow.set_visible(False)
                 invest_label_follow.set_visible(False)
                 value_label_pin.set_visible(True)
                 invest_label_pin.set_visible(True)
+                if has_dividend:
+                    dividend_label_follow.set_visible(False)
+                    dividend_label_pin.set_visible(True)
 
                 value_label_pin.set_position((LABEL_X_FRAC, vy))
                 invest_label_pin.set_position((LABEL_X_FRAC, iy))
                 value_label_pin.set_va("bottom" if vy >= iy else "top")
                 invest_label_pin.set_va("bottom" if iy >= vy else "top")
+                if has_dividend:
+                    dividend_label_pin.set_position((LABEL_X_FRAC, dy))
+                    ref_top = max(vy, iy)
+                    ref_bottom = min(vy, iy)
+                    if dy >= ref_top:
+                        dividend_label_pin.set_va("bottom")
+                    elif dy <= ref_bottom:
+                        dividend_label_pin.set_va("top")
+                    else:
+                        dividend_label_pin.set_va("center")
 
             # Progress bar
             prog = (x_last_ns - xmin_ns) / denom_ns if denom_ns > 0 else 1.0
             pbar_fill.set_data([0.0, float(np.clip(prog, 0.0, 1.0))], [0.5, 0.5])
 
             # Gain/Loss
-            delta = val_last - inv_last
+            total_last = val_last + (div_last if has_dividend else 0.0)
+            delta = total_last - inv_last
             if delta > 0:
                 pl_text.set_text(f"{gain_word}: {format_euro(delta)}"); pl_text.set_color("#16A34A")
             elif delta < 0:
@@ -621,16 +751,24 @@ def make_animation(
             # hide end-card during chart frames
             end_bg.set_alpha(0.0); end_title.set_alpha(0.0); end_handle.set_alpha(0.0)
 
-            return (value_line, invest_line, value_dot, invest_dot,
-                    value_label_follow, invest_label_follow,
-                    value_label_pin, invest_label_pin,
-                    pbar_fill, pl_text, end_bg, end_title, end_handle)
+            artists = [
+                value_line, invest_line, value_dot, invest_dot,
+                value_label_follow, invest_label_follow,
+                value_label_pin, invest_label_pin,
+                pbar_fill, pl_text, end_bg, end_title, end_handle,
+            ]
+            if has_dividend:
+                artists.extend([dividend_line, dividend_dot, dividend_label_follow, dividend_label_pin])
+            return tuple(artists)
 
         else:  # mode == "end" → 2-second end card
             end_bg.set_alpha(1.0)
             end_title.set_alpha(1.0)
             end_handle.set_alpha(1.0)
-            return (end_bg, end_title, end_handle)
+            artists = [end_bg, end_title, end_handle]
+            if has_dividend:
+                artists.extend([dividend_line, dividend_dot, dividend_label_follow, dividend_label_pin])
+            return tuple(artists)
 
     # Full redraw needed (x/y lims change every frame)
     ani = animation.FuncAnimation(
