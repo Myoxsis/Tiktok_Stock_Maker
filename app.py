@@ -220,7 +220,12 @@ def main() -> None:
         "Playback speed", min_value=0.5, max_value=2.0, value=1.0, step=0.1
     )
     freeze_sec = st.sidebar.slider(
-        "Freeze on last frame (s)", min_value=0.0, max_value=3.0, value=0.5, step=0.1
+        "Hold last chart frame (s)",
+        min_value=0.0,
+        max_value=5.0,
+        value=1.0,
+        step=0.1,
+        help="Pause on the final chart view before showing the end screen.",
     )
     duration_options = {
         "20 seconds": 20.0,
