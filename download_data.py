@@ -5,7 +5,7 @@ import pandas as pd
 
 def download_stock_data(ticker: str, period: str = "1y"):
     """
-    Download historical stock data for a given ticker and save Date, Close to a CSV.
+    Download historical stock data for a given ticker and save Date, Close, and Dividends to a CSV.
     
     Args:
         ticker (str): Stock ticker (e.g. 'AAPL' for Apple, 'BN.PA' for Danone in Paris).
@@ -14,21 +14,29 @@ def download_stock_data(ticker: str, period: str = "1y"):
     # Create "data" folder if it doesn't exist
     os.makedirs("data", exist_ok=True)
 
-    # Download stock data
-    df = yf.download(ticker, period=period)
+    # Download stock data including dividend information
+    df = yf.download(ticker, period=period, actions=True)
 
     if df.empty:
         print(f"❌ No data found for ticker {ticker}")
         return
     
-    # Reset index and keep Date, Close
-    df = df.reset_index()[["Date", "Close"]]
+    # Reset index to turn the Date into a column
+    df = df.reset_index()
+
+    # Ensure a Dividends column is available (may be absent for some tickers/periods)
+    if "Dividends" not in df.columns:
+        df["Dividends"] = 0.0
+
+    # Keep only the relevant columns
+    df = df[["Date", "Close", "Dividends"]]
 
     # Ensure date format YYYY-MM-DD
     df["Date"] = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m-%d")
 
-    # Ensure Close uses dot decimal
+    # Ensure numeric columns use dot decimal
     df["Close"] = df["Close"].astype(float)
+    df["Dividends"] = df["Dividends"].fillna(0).astype(float)
 
     # Save to CSV with dot as decimal separator
     file_path = os.path.join("data", f"{ticker}.csv")
