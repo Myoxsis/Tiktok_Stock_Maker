@@ -201,7 +201,25 @@ def main() -> None:
     max_date = datetime.today().date()
 
     company = st.sidebar.text_input("Company/Ticker", value="Company Y")
-    mode = st.sidebar.selectbox("Mode", options=["fixed", "dca"], format_func=lambda x: x.upper())
+    mode = st.sidebar.selectbox(
+        "Mode",
+        options=["fixed", "dca", "compare"],
+        format_func=lambda x: x.upper(),
+    )
+
+    investment_mode = mode
+    company_compare = ""
+    if mode == "compare":
+        investment_mode = st.sidebar.selectbox(
+            "Comparison investment type",
+            options=["fixed", "dca"],
+            format_func=lambda x: x.upper(),
+        )
+        company_compare = st.sidebar.text_input(
+            "Second Company/Ticker",
+            value="Company Z",
+        )
+
     start_date = st.sidebar.date_input(
         "Start date",
         value=min_date,
@@ -221,12 +239,42 @@ def main() -> None:
         step=50.0,
     )
     freq = None
-    if mode == "dca":
+    if investment_mode == "dca":
         freq = st.sidebar.selectbox(
             "DCA frequency",
             options=["weekly", "monthly", "yearly"],
             format_func=lambda x: x.capitalize(),
         )
+
+    comparison_prices: Optional[pd.DataFrame] = None
+    comparison_csv_path: Optional[str] = None
+    if mode == "compare":
+        st.sidebar.header("Second ticker data")
+        csv_choice_cmp = st.sidebar.radio(
+            "Select data source for ticker 2",
+            options=["Sample dataset", "Upload CSV"],
+            key="compare_csv_choice",
+        )
+        uploaded_csv_cmp = None
+        if csv_choice_cmp == "Upload CSV":
+            uploaded_csv_cmp = st.sidebar.file_uploader(
+                "Upload CSV for ticker 2",
+                type=["csv"],
+                accept_multiple_files=False,
+                key="compare_csv_uploader",
+            )
+        comparison_csv_path = _resolve_csv_path(csv_choice_cmp, uploaded_csv_cmp)
+        if comparison_csv_path:
+            try:
+                comparison_prices = _load_prices(
+                    comparison_csv_path, date_col, price_col
+                )
+                st.sidebar.success(
+                    f"Loaded {Path(comparison_csv_path).name} with {len(comparison_prices):,} rows."
+                )
+            except Exception as exc:
+                comparison_prices = None
+                st.sidebar.error(f"Failed to load comparison CSV: {exc}")
     fps = st.sidebar.slider("FPS", min_value=15, max_value=60, value=30)
     speed = st.sidebar.slider(
         "Playback speed", min_value=0.5, max_value=2.0, value=1.0, step=0.1
@@ -253,11 +301,24 @@ def main() -> None:
     reveal_duration = duration_options[duration_choice]
     lang_code = st.sidebar.selectbox("Language", options=["en", "fr"], index=0)
 
-    generate_btn = st.sidebar.button("Generate video", type="primary")
+    generate_label = "Generate videos" if mode == "compare" else "Generate video"
+    generate_btn = st.sidebar.button(generate_label, type="primary")
 
     if prices is not None and not prices.empty:
-        st.subheader("Price preview")
-        st.line_chart(prices.set_index("date")["close"], height=300, use_container_width=True)
+        primary_label = company or "Ticker 1"
+        st.subheader(f"Price preview — {primary_label}")
+        st.line_chart(
+            prices.set_index("date")["close"], height=300, use_container_width=True
+        )
+
+    if mode == "compare" and comparison_prices is not None and not comparison_prices.empty:
+        secondary_label = company_compare or "Ticker 2"
+        st.subheader(f"Price preview — {secondary_label}")
+        st.line_chart(
+            comparison_prices.set_index("date")["close"],
+            height=300,
+            use_container_width=True,
+        )
 
     if prices is not None and generate_btn:
         if start_date > end_date:
@@ -265,34 +326,98 @@ def main() -> None:
         else:
             start_dt = datetime.combine(start_date, datetime.min.time())
             end_dt = datetime.combine(end_date, datetime.min.time()) if end_date else None
-            try:
-                with st.spinner("Rendering video..."):
-                    video_path, start_used = _generate_video(
-                        prices,
-                        company,
-                        mode,
-                        start_dt,
-                        end_dt,
-                        amount,
-                        freq,
-                        fps,
-                        speed,
-                        freeze_sec,
-                        lang_code,
-                        reveal_duration,
-                    )
-                download_filename = f"{_slugify_name(company)}_{mode}_{start_used.date().isoformat()}.mp4"
-                st.success(f"Video created: {download_filename}")
-                st.video(str(video_path))
-                with video_path.open("rb") as video_file:
-                    st.download_button(
-                        "Download video",
-                        data=video_file.read(),
-                        file_name=download_filename,
-                        mime="video/mp4",
-                    )
-            except Exception as exc:
-                st.error(f"Failed to render video: {exc}")
+
+            if mode == "compare" and (
+                comparison_prices is None or comparison_prices.empty
+            ):
+                st.error("Load price data for the second ticker to run a comparison.")
+            else:
+                try:
+                    if mode == "compare":
+                        comparison_name = company_compare or "Ticker 2"
+                        with st.spinner("Rendering comparison videos..."):
+                            video_primary, start_used_primary = _generate_video(
+                                prices,
+                                company or "Ticker 1",
+                                investment_mode,
+                                start_dt,
+                                end_dt,
+                                amount,
+                                freq,
+                                fps,
+                                speed,
+                                freeze_sec,
+                                lang_code,
+                                reveal_duration,
+                            )
+                            assert comparison_prices is not None
+                            video_secondary, start_used_secondary = _generate_video(
+                                comparison_prices,
+                                comparison_name,
+                                investment_mode,
+                                start_dt,
+                                end_dt,
+                                amount,
+                                freq,
+                                fps,
+                                speed,
+                                freeze_sec,
+                                lang_code,
+                                reveal_duration,
+                            )
+
+                        st.success("Videos created for both tickers.")
+                        col_primary, col_secondary = st.columns(2)
+                        ticker_entries = [
+                            (col_primary, company or "Ticker 1", video_primary, start_used_primary),
+                            (col_secondary, comparison_name, video_secondary, start_used_secondary),
+                        ]
+                        for column, name, path, start_used_val in ticker_entries:
+                            download_filename = (
+                                f"{_slugify_name(name)}_{investment_mode}_{start_used_val.date().isoformat()}.mp4"
+                            )
+                            with column:
+                                st.markdown(f"**{name}**")
+                                st.caption(
+                                    f"Start date used: {start_used_val.date().isoformat()}"
+                                )
+                                st.video(str(path))
+                                st.download_button(
+                                    f"Download {name}",
+                                    data=path.read_bytes(),
+                                    file_name=download_filename,
+                                    mime="video/mp4",
+                                )
+                    else:
+                        with st.spinner("Rendering video..."):
+                            video_path, start_used = _generate_video(
+                                prices,
+                                company,
+                                investment_mode,
+                                start_dt,
+                                end_dt,
+                                amount,
+                                freq,
+                                fps,
+                                speed,
+                                freeze_sec,
+                                lang_code,
+                                reveal_duration,
+                            )
+                        download_filename = (
+                            f"{_slugify_name(company)}_{investment_mode}_{start_used.date().isoformat()}.mp4"
+                        )
+                        st.success(f"Video created: {download_filename}")
+                        st.video(str(video_path))
+                        with video_path.open("rb") as video_file:
+                            st.download_button(
+                                "Download video",
+                                data=video_file.read(),
+                                file_name=download_filename,
+                                mime="video/mp4",
+                            )
+                except Exception as exc:
+                    st.error(f"Failed to render video: {exc}")
 
 
 if __name__ == "__main__":
