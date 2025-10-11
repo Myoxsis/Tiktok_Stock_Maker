@@ -232,7 +232,7 @@ def make_animation(
     dates, prices, snapshots, title, subtitle, outfile,
     fps=30, speed=1.0, dpi=100, lang=None,
     reveal_sec=60.0,
-    freeze_hold_sec=0.0,  # kept but ignored for the reveal schedule
+    freeze_hold_sec=0.0,
 ):
     """
     Plots the data continuously for the requested duration (``reveal_sec`` seconds),
@@ -299,8 +299,9 @@ def make_animation(
     invested_series = np.array([s.invested for s in snapshots], dtype=float)
     value_series    = np.array([s.value    for s in snapshots], dtype=float)
 
-    # ===== Frame schedule: reveal + 2s end card =====
+    # ===== Frame schedule: reveal + optional freeze + 2s end card =====
     reveal_frames  = max(1, int(round(reveal_sec * fps)))
+    freeze_frames  = max(0, int(round(max(freeze_hold_sec, 0.0) * fps)))
     endcard_frames = max(0, int(round(ENDCARD_SEC * fps)))
 
     # Map animation frames to data indices linearly across the dataset.
@@ -309,7 +310,10 @@ def make_animation(
     data_indices[0]  = max(1, data_indices[0])
     data_indices[-1] = frames_total
 
-    frames = [("chart", int(k)) for k in data_indices] + [("end", i) for i in range(endcard_frames)]
+    frames = [("chart", int(k)) for k in data_indices]
+    if freeze_frames:
+        frames.extend([("chart", frames_total)] * freeze_frames)
+    frames.extend([("end", i) for i in range(endcard_frames)])
     # =====================================================
 
     # --- Figure (portrait) ---
