@@ -119,6 +119,7 @@ def load_prices(csv_path, date_col="Date", price_col="Close", tz_aware=False):
     df = df[cols].copy()
 
     df[date_col] = pd.to_datetime(df[date_col], utc=tz_aware, errors="coerce")
+    df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
     if dividend_col:
         df[dividend_col] = pd.to_numeric(df[dividend_col], errors="coerce").fillna(0.0)
 
@@ -141,6 +142,8 @@ def load_prices(csv_path, date_col="Date", price_col="Close", tz_aware=False):
         df["dividend"] = 0.0
     else:
         df["dividend"] = df["dividend"].fillna(0.0)
+
+    df["close"] = df["close"].astype(float)
 
     return df
 
