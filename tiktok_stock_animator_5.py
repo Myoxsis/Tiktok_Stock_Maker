@@ -44,6 +44,8 @@ LANGS = {
         "freq_monthly": "month",
         "freq_yearly": "year",
         "handle": "@investir_intelligent",
+        "cta_question": "What should I test tomorrow?",
+        "cta_follow": "Follow for Tomorrow's ticker",
         "no_frames": "No data to animate: your visible date range is empty. Check your CSV and --start/--end.",
         "warn_shift_start": "[WARN] --start {req} is before CSV. Shifting to {used}.",
         "warn_shift_end": "[WARN] --end {req} is after CSV. Shifting to {used}.",
@@ -74,6 +76,8 @@ LANGS = {
         "freq_monthly": "mois",
         "freq_yearly": "an",
         "handle": "@investir_intelligent",
+        "cta_question": "On teste quoi demain ?",
+        "cta_follow": "Suis-moi pour le ticker de demain",
         "no_frames": "Aucune donnée à animer : la plage visible est vide. Vérifiez le CSV et --start/--end.",
         "warn_shift_start": "[AVERT] --start {req} est avant le CSV. Décalé à {used}.",
         "warn_shift_end": "[AVERT] --end {req} est après le CSV. Décalé à {used}.",
@@ -320,7 +324,8 @@ def make_comparison_animation(
     HANDLE_Y = 0.16
     LABEL_X_FRAC = 0.985
     BG = "#0b0f14"
-    CTA_TEXT = "Tu veux que je teste quoi ensuite ?"
+    CTA_QUESTION = lang["cta_question"]
+    CTA_FOLLOW = lang["cta_follow"]
     FOLLOW_TO_PIN_FRAC = 0.70
     YPAD_FRAC = 0.10
     CUSHION_FRAC = 0.03
@@ -464,12 +469,23 @@ def make_comparison_animation(
     end_title = end_ax.text(
         0.5,
         0.56,
-        CTA_TEXT,
+        CTA_QUESTION,
         ha="center",
         va="center",
         color="#FFFFFF",
         fontsize=28,
         weight="bold",
+        alpha=0.0,
+        zorder=1,
+    )
+    end_follow = end_ax.text(
+        0.5,
+        0.50,
+        CTA_FOLLOW,
+        ha="center",
+        va="center",
+        color="#9FB3C8",
+        fontsize=20,
         alpha=0.0,
         zorder=1,
     )
@@ -499,6 +515,7 @@ def make_comparison_animation(
         pl_text.set_text("")
         end_bg.set_alpha(0.0)
         end_title.set_alpha(0.0)
+        end_follow.set_alpha(0.0)
         end_handle.set_alpha(0.0)
         for label in (
             primary_follow,
@@ -520,6 +537,7 @@ def make_comparison_animation(
             pl_text,
             end_bg,
             end_title,
+            end_follow,
             end_handle,
             primary_follow,
             secondary_follow,
@@ -657,6 +675,7 @@ def make_comparison_animation(
 
             end_bg.set_alpha(0.0)
             end_title.set_alpha(0.0)
+            end_follow.set_alpha(0.0)
             end_handle.set_alpha(0.0)
 
             return (
@@ -670,6 +689,7 @@ def make_comparison_animation(
                 pl_text,
                 end_bg,
                 end_title,
+                end_follow,
                 end_handle,
                 primary_follow,
                 secondary_follow,
@@ -681,8 +701,9 @@ def make_comparison_animation(
         else:
             end_bg.set_alpha(1.0)
             end_title.set_alpha(1.0)
+            end_follow.set_alpha(1.0)
             end_handle.set_alpha(1.0)
-            return (end_bg, end_title, end_handle)
+            return (end_bg, end_title, end_follow, end_handle)
 
     ani = animation.FuncAnimation(
         fig, update, frames=frames, init_func=init, blit=False, interval=1000 / fps
@@ -827,7 +848,8 @@ def make_animation(
     LABEL_X_FRAC = 0.985
     WATERMARK_ALPHA = 0.25
     BG           = "#0b0f14"
-    CTA_TEXT     = "Tu veux que je teste quoi ensuite ?"
+    CTA_QUESTION = lang["cta_question"]
+    CTA_FOLLOW   = lang["cta_follow"]
     reveal_sec = max(float(reveal_sec), 1.0)    # <-- line reveals for chosen duration
     ENDCARD_SEC  = 2.0                         # 2s end card shown after the reveal
 
@@ -1054,8 +1076,12 @@ def make_animation(
     end_bg = Rectangle((0, 0), 1, 1, transform=end_ax.transAxes, color=BG, alpha=0.0, zorder=0)
     end_ax.add_patch(end_bg)
     end_title = end_ax.text(
-        0.5, 0.56, CTA_TEXT, ha="center", va="center",
+        0.5, 0.56, CTA_QUESTION, ha="center", va="center",
         color="#FFFFFF", fontsize=28, weight="bold", alpha=0.0, zorder=1
+    )
+    end_follow = end_ax.text(
+        0.5, 0.50, CTA_FOLLOW, ha="center", va="center",
+        color="#9FB3C8", fontsize=20, alpha=0.0, zorder=1
     )
     end_handle = end_ax.text(
         0.5, 0.46, lang["handle"], ha="center", va="center",
@@ -1075,7 +1101,7 @@ def make_animation(
             dividend_dot.set_data([], [])
         pbar_fill.set_data([], [])
         pl_text.set_text("")
-        end_bg.set_alpha(0.0); end_title.set_alpha(0.0); end_handle.set_alpha(0.0)
+        end_bg.set_alpha(0.0); end_title.set_alpha(0.0); end_follow.set_alpha(0.0); end_handle.set_alpha(0.0)
         value_label_follow.set_visible(False)
         invest_label_follow.set_visible(False)
         value_label_pin.set_visible(False)
@@ -1087,7 +1113,7 @@ def make_animation(
             value_line, invest_line, value_dot, invest_dot,
             value_label_follow, invest_label_follow,
             value_label_pin, invest_label_pin,
-            pbar_fill, pl_text, end_bg, end_title, end_handle,
+            pbar_fill, pl_text, end_bg, end_title, end_follow, end_handle,
         ]
         if has_dividend:
             artists.extend([dividend_line, dividend_dot, dividend_label_follow, dividend_label_pin])
@@ -1271,13 +1297,13 @@ def make_animation(
                 pl_text.set_text(f"{gain_word}: {format_euro(0)}");       pl_text.set_color("#9FB3C8")
 
             # hide end-card during chart frames
-            end_bg.set_alpha(0.0); end_title.set_alpha(0.0); end_handle.set_alpha(0.0)
+            end_bg.set_alpha(0.0); end_title.set_alpha(0.0); end_follow.set_alpha(0.0); end_handle.set_alpha(0.0)
 
             artists = [
                 value_line, invest_line, value_dot, invest_dot,
                 value_label_follow, invest_label_follow,
                 value_label_pin, invest_label_pin,
-                pbar_fill, pl_text, end_bg, end_title, end_handle,
+                pbar_fill, pl_text, end_bg, end_title, end_follow, end_handle,
             ]
             if has_dividend:
                 artists.extend([dividend_line, dividend_dot, dividend_label_follow, dividend_label_pin])
@@ -1286,8 +1312,9 @@ def make_animation(
         else:  # mode == "end" → 2-second end card
             end_bg.set_alpha(1.0)
             end_title.set_alpha(1.0)
+            end_follow.set_alpha(1.0)
             end_handle.set_alpha(1.0)
-            artists = [end_bg, end_title, end_handle]
+            artists = [end_bg, end_title, end_follow, end_handle]
             if has_dividend:
                 artists.extend([dividend_line, dividend_dot, dividend_label_follow, dividend_label_pin])
             return tuple(artists)
