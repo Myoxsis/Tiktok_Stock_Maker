@@ -36,7 +36,9 @@ def download_stock_data(ticker: str, period: str = "1y"):
 
     # Ensure numeric columns use dot decimal
     df["Close"] = df["Close"].astype(float)
-    df["Dividends"] = df["Dividends"].fillna(0).astype(float)
+    df["Dividend"] = df["Dividends"].fillna(0).astype(float)
+
+    df = df[["Date", "Close", "Dividend"]]
 
     # Save to CSV with dot as decimal separator
     file_path = os.path.join("data", f"{ticker}.csv")
