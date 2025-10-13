@@ -303,6 +303,7 @@ def make_animation(
     span_ns = max(xmax_ns - xmin_ns, 1)
     right_pad_ns = max(int(span_ns * 0.06), int(12 * 3600 * 1e9))  # ≥ 12h
     xlim_right = xmax_dt + pd.to_timedelta(right_pad_ns, unit="ns")
+    xlim_right_ns = int(pd.Timestamp(xlim_right).value)
 
     ax.set_xlim(xmin_dt, xlim_right)
     ax.set_ylim(ymin - ypad, ymax + ypad)
@@ -376,8 +377,21 @@ def make_animation(
         invest_line.set_data(x, yi)
 
         val_last = float(yv[-1]); inv_last = float(yi[-1])
-        value_dot.set_data([x[-1]], [val_last])
-        invest_dot.set_data([x[-1]], [inv_last])
+        x_last_ts = x[-1]
+        x_last_ns = int(dates_ns[k - 1])
+
+        growth_target_ns = xmin_ns + max(
+            int(0.10 * (xlim_right_ns - xmin_ns)),
+            int((k / frames_total) * (xlim_right_ns - xmin_ns)),
+        )
+        visible_right_ns = min(
+            xlim_right_ns,
+            max(growth_target_ns, x_last_ns + right_pad_ns),
+        )
+        ax.set_xlim(xmin_dt, pd.to_datetime(visible_right_ns, unit="ns"))
+
+        value_dot.set_data([x_last_ts], [val_last])
+        invest_dot.set_data([x_last_ts], [inv_last])
 
         vy, cushion = _clipy(val_last)
         iy, _       = _clipy(inv_last)
