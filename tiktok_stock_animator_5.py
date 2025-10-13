@@ -5,6 +5,7 @@ import argparse
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
+from typing import List, Optional, Tuple
 from dateutil.relativedelta import relativedelta
 
 import numpy as np
@@ -12,6 +13,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.animation import FFMpegWriter
+from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter
 from matplotlib.transforms import blended_transform_factory
 import matplotlib.dates as mdates
@@ -180,6 +182,524 @@ class PortfolioSnapshot:
     pnl_pct: float
     dividends: float = 0.0
 
+
+def _snapshots_to_frame(snapshots: List["PortfolioSnapshot"]) -> pd.DataFrame:
+    """Return a DataFrame indexed by date with invested and value columns."""
+    if not snapshots:
+        return pd.DataFrame(columns=["invested", "value"])
+    data = {
+        "date": [s.date for s in snapshots],
+        "invested": [s.invested for s in snapshots],
+        "value": [s.value for s in snapshots],
+    }
+    df = pd.DataFrame(data)
+    df = df.drop_duplicates("date", keep="last").sort_values("date")
+    df = df.set_index("date")
+    return df
+
+
+@dataclass
+class PortfolioSeries:
+    company: str
+    snapshots: List[PortfolioSnapshot]
+    vis_dates: np.ndarray
+    vis_close: np.ndarray
+    start_used: pd.Timestamp
+
+
+def prepare_portfolio(
+    prices: pd.DataFrame,
+    company: str,
+    mode: str,
+    start_date: datetime,
+    amount: float,
+    freq: Optional[str] = None,
+    end_date: Optional[datetime] = None,
+) -> PortfolioSeries:
+    """Compute portfolio snapshots for the requested configuration."""
+
+    if prices is None or prices.empty:
+        raise ValueError("No price data available inside the selected date range.")
+
+    if mode == "fixed":
+        snapshots, vis_dates, vis_close, start_used = series_fixed_investment(
+            prices, start_date, amount
+        )
+    else:
+        if freq is None:
+            raise ValueError("Choose a dollar-cost averaging frequency.")
+        snapshots, vis_dates, vis_close, start_used = series_dca(
+            prices, start_date, amount, freq, end_date
+        )
+
+    return PortfolioSeries(company, snapshots, vis_dates, vis_close, start_used)
+
+
+def make_comparison_animation(
+    primary: PortfolioSeries,
+    secondary: PortfolioSeries,
+    title: str,
+    subtitle: str,
+    outfile,
+    fps: int = 30,
+    speed: float = 1.0,
+    dpi: int = 100,
+    lang: Optional[dict] = None,
+    reveal_sec: float = 60.0,
+    freeze_hold_sec: float = 0.0,
+):
+    """Render a comparison video showing both tickers and the invested amount."""
+
+    lang = lang or get_lang("en")
+
+    df_primary = _snapshots_to_frame(primary.snapshots)
+    df_secondary = _snapshots_to_frame(secondary.snapshots)
+    if df_primary.empty or df_secondary.empty:
+        raise ValueError(lang["no_frames"])
+
+    start_ts = max(df_primary.index.min(), df_secondary.index.min())
+    dates_idx = df_primary.index.union(df_secondary.index)
+    dates_idx = dates_idx[dates_idx >= start_ts]
+    if len(dates_idx) == 0:
+        raise ValueError(lang["no_frames"])
+
+    df_primary = df_primary.reindex(dates_idx).ffill()
+    df_secondary = df_secondary.reindex(dates_idx).ffill()
+
+    combined = pd.DataFrame(index=dates_idx)
+    combined["value_primary"] = df_primary["value"]
+    combined["value_secondary"] = df_secondary["value"]
+    combined["invested_primary"] = df_primary["invested"]
+    combined["invested_secondary"] = df_secondary["invested"]
+    combined = combined.dropna(subset=["value_primary", "value_secondary"])
+    if combined.empty:
+        raise ValueError(lang["no_frames"])
+
+    combined["invested"] = combined[
+        ["invested_primary", "invested_secondary"]
+    ].max(axis=1)
+    combined = combined.dropna(subset=["invested"])
+    if combined.empty:
+        raise ValueError(lang["no_frames"])
+
+    dates = pd.DatetimeIndex(combined.index)
+    dates_ns = dates.view("i8").astype(np.int64)
+    frames_total = len(dates)
+    if frames_total == 0:
+        raise ValueError(lang["no_frames"])
+
+    invested_series = combined["invested"].to_numpy(dtype=float)
+    value_primary_series = combined["value_primary"].to_numpy(dtype=float)
+    value_secondary_series = combined["value_secondary"].to_numpy(dtype=float)
+
+    # ===== Frame schedule =====
+    reveal_frames = max(1, int(round(reveal_sec * fps)))
+    freeze_frames = max(0, int(round(max(freeze_hold_sec, 0.0) * fps)))
+    endcard_frames = max(0, int(round(2.0 * fps)))
+
+    data_indices = np.linspace(1, frames_total, reveal_frames, dtype=int)
+    data_indices[0] = max(1, data_indices[0])
+    data_indices[-1] = frames_total
+
+    frames = [("chart", int(k)) for k in data_indices]
+    if freeze_frames:
+        frames.extend([("chart", frames_total)] * freeze_frames)
+    frames.extend([("end", i) for i in range(endcard_frames)])
+
+    # Figure layout (portrait)
+    width_px, height_px = 1080, 1920
+    fig_w, fig_h = width_px / dpi, height_px / dpi
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
+    fig.patch.set_facecolor("#0b0f14")
+
+    PLOT_RECT = [0.14, 0.28, 0.72, 0.54]
+    PBAR_RECT = [0.14, 0.22, 0.72, 0.015]
+    PL_RECT = [0.14, 0.19, 0.72, 0.022]
+    TITLE_Y = 0.92
+    SUBTITLE_Y = 0.89
+    HANDLE_Y = 0.16
+    LABEL_X_FRAC = 0.985
+    BG = "#0b0f14"
+    CTA_TEXT = "Tu veux que je teste quoi ensuite ?"
+    FOLLOW_TO_PIN_FRAC = 0.70
+    YPAD_FRAC = 0.10
+    CUSHION_FRAC = 0.03
+    RIGHT_MARGIN_FRAC = 0.02
+    RIGHT_MARGIN_MIN_NS = int(6 * 3600 * 1e9)
+
+    ax = plt.axes(PLOT_RECT)
+    ax.set_zorder(2)
+    style_axes(ax)
+
+    fig.text(0.50, TITLE_Y, title, ha="center", va="top", color="#FFFFFF", fontsize=28, weight="bold")
+    fig.text(0.50, SUBTITLE_Y, subtitle, ha="center", va="top", color="#9FB3C8", fontsize=18)
+    fig.text(0.03, HANDLE_Y, lang["handle"], ha="left", va="bottom", color="#5A6B7A", fontsize=16)
+
+    xmin_dt, xmax_dt = dates[0], dates[-1]
+    xmin_ns, xmax_ns = int(dates_ns[0]), int(dates_ns[-1])
+    span_ns_data = max(xmax_ns - xmin_ns, 1)
+    right_pad_ns_static = max(int(span_ns_data * 0.06), int(12 * 3600 * 1e9))
+    xlim_right = xmax_dt + pd.to_timedelta(right_pad_ns_static, unit="ns")
+
+    def _ns(dt) -> int:
+        return int(pd.Timestamp(dt).value)
+
+    xlim_right_ns = _ns(xlim_right)
+    span_ns_full = max(xlim_right_ns - xmin_ns, 1)
+
+    ax.set_xlim(xmin_dt, xlim_right)
+    ax.set_xlabel(lang["axis_date"], color="#D8E1E8", fontsize=14)
+    ax.set_ylabel("€", color="#D8E1E8", fontsize=14)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{int(round(y))}€"))
+
+    span_days = max(1, int((xlim_right - xmin_dt).days))
+    target_ticks = 7
+    if span_days <= 40:
+        interval = max(1, int(np.ceil(span_days / target_ticks)))
+        major_locator = mdates.DayLocator(interval=interval)
+        major_fmt = mdates.DateFormatter('%d %b')
+        minor_locator = mdates.DayLocator(interval=max(1, interval // 2))
+    elif span_days <= 370:
+        span_months = max(1, int(np.ceil(span_days / 30.44)))
+        interval = max(1, int(np.ceil(span_months / target_ticks)))
+        major_locator = mdates.MonthLocator(interval=interval)
+        major_fmt = mdates.DateFormatter('%b %Y')
+        minor_locator = mdates.MonthLocator(interval=max(1, interval // 2))
+    else:
+        span_years = max(1, int(np.ceil(span_days / 365.25)))
+        interval = max(1, int(np.ceil(span_years / target_ticks)))
+        major_locator = mdates.YearLocator(base=interval)
+        major_fmt = mdates.DateFormatter('%Y')
+        minor_locator = mdates.MonthLocator(bymonth=(1, 7))
+    ax.xaxis.set_major_locator(major_locator)
+    ax.xaxis.set_major_formatter(major_fmt)
+    ax.xaxis.set_minor_locator(minor_locator)
+    ax.tick_params(axis='x', labelsize=14, rotation=0, pad=6)
+    ax.grid(which='major', axis='x', alpha=0.12)
+
+    COLOR_PRIMARY = "#6CCFF6"
+    COLOR_SECONDARY = "#C084FC"
+    COLOR_INVESTED = "#F7A072"
+
+    (value_primary_line,) = ax.plot([], [], lw=3, color=COLOR_PRIMARY)
+    (value_secondary_line,) = ax.plot([], [], lw=3, color=COLOR_SECONDARY)
+    (invest_line,) = ax.plot([], [], lw=2, linestyle="--", color=COLOR_INVESTED)
+    (value_primary_dot,) = ax.plot([], [], "o", ms=8, color=COLOR_PRIMARY, zorder=5)
+    (value_secondary_dot,) = ax.plot([], [], "o", ms=8, color=COLOR_SECONDARY, zorder=5)
+    (invest_dot,) = ax.plot([], [], "o", ms=8, color=COLOR_INVESTED, zorder=5)
+
+    trans_right = blended_transform_factory(ax.transAxes, ax.transData)
+
+    def _label(**kwargs):
+        params = dict(
+            transform=ax.transData,
+            ha="left",
+            va="center",
+            fontsize=16,
+            weight="bold",
+            zorder=6,
+            clip_on=True,
+            bbox=dict(boxstyle="round,pad=0.2", fc=BG, ec=kwargs["edge"], lw=1),
+            visible=False,
+        )
+        params.update(kwargs.get("extra", {}))
+        return ax.text(dates[0], 0, "", color=kwargs["color"], **params)
+
+    primary_follow = _label(color=COLOR_PRIMARY, edge=COLOR_PRIMARY)
+    secondary_follow = _label(color=COLOR_SECONDARY, edge=COLOR_SECONDARY)
+    invest_follow = _label(color=COLOR_INVESTED, edge=COLOR_INVESTED)
+
+    def _pin_label(color, edge):
+        return ax.text(
+            LABEL_X_FRAC,
+            0,
+            "",
+            transform=trans_right,
+            ha="right",
+            va="center",
+            fontsize=16,
+            weight="bold",
+            zorder=6,
+            clip_on=False,
+            bbox=dict(boxstyle="round,pad=0.2", fc=BG, ec=edge, lw=1),
+            color=color,
+            visible=False,
+        )
+
+    primary_pin = _pin_label(COLOR_PRIMARY, COLOR_PRIMARY)
+    secondary_pin = _pin_label(COLOR_SECONDARY, COLOR_SECONDARY)
+    invest_pin = _pin_label(COLOR_INVESTED, COLOR_INVESTED)
+
+    pbar_ax = plt.axes(PBAR_RECT)
+    pbar_ax.set_zorder(3)
+    pbar_ax.set_facecolor(BG)
+    pbar_ax.set_xticks([])
+    pbar_ax.set_yticks([])
+    for spine in pbar_ax.spines.values():
+        spine.set_visible(False)
+    pbar_ax.set_xlim(0, 1)
+    pbar_ax.set_ylim(0, 1)
+    (pbar_fill,) = pbar_ax.plot([], [], lw=6, color=COLOR_PRIMARY)
+
+    pl_ax = plt.axes(PL_RECT)
+    pl_ax.set_zorder(3)
+    pl_ax.axis("off")
+    pl_text = pl_ax.text(
+        0.5,
+        0.5,
+        "",
+        transform=pl_ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=22,
+        weight="bold",
+        zorder=10,
+        bbox=dict(boxstyle="round,pad=0.25", fc=BG, ec="#22303C", lw=1, alpha=0.9),
+    )
+
+    end_ax = fig.add_axes([0, 0, 1, 1], zorder=100)
+    end_ax.axis("off")
+    end_bg = Rectangle((0, 0), 1, 1, transform=end_ax.transAxes, color=BG, alpha=0.0, zorder=0)
+    end_ax.add_patch(end_bg)
+    end_title = end_ax.text(
+        0.5,
+        0.56,
+        CTA_TEXT,
+        ha="center",
+        va="center",
+        color="#FFFFFF",
+        fontsize=28,
+        weight="bold",
+        alpha=0.0,
+        zorder=1,
+    )
+    end_handle = end_ax.text(
+        0.5,
+        0.46,
+        lang["handle"],
+        ha="center",
+        va="center",
+        color="#9FB3C8",
+        fontsize=20,
+        alpha=0.0,
+        zorder=1,
+    )
+
+    denom_ns = xmax_ns - xmin_ns
+    follow_xoff_ns = max(int(span_ns_data * 0.02), int(6 * 3600 * 1e9))
+
+    def init():
+        value_primary_line.set_data([], [])
+        value_secondary_line.set_data([], [])
+        invest_line.set_data([], [])
+        value_primary_dot.set_data([], [])
+        value_secondary_dot.set_data([], [])
+        invest_dot.set_data([], [])
+        pbar_fill.set_data([], [])
+        pl_text.set_text("")
+        end_bg.set_alpha(0.0)
+        end_title.set_alpha(0.0)
+        end_handle.set_alpha(0.0)
+        for label in (
+            primary_follow,
+            secondary_follow,
+            invest_follow,
+            primary_pin,
+            secondary_pin,
+            invest_pin,
+        ):
+            label.set_visible(False)
+        return (
+            value_primary_line,
+            value_secondary_line,
+            invest_line,
+            value_primary_dot,
+            value_secondary_dot,
+            invest_dot,
+            pbar_fill,
+            pl_text,
+            end_bg,
+            end_title,
+            end_handle,
+            primary_follow,
+            secondary_follow,
+            invest_follow,
+            primary_pin,
+            secondary_pin,
+            invest_pin,
+        )
+
+    def update(frame):
+        mode, payload = frame
+        if mode == "chart":
+            k = min(int(payload), frames_total)
+            x = dates[:k]
+            y_primary = value_primary_series[:k]
+            y_secondary = value_secondary_series[:k]
+            y_invested = invested_series[:k]
+
+            value_primary_line.set_data(x, y_primary)
+            value_secondary_line.set_data(x, y_secondary)
+            invest_line.set_data(x, y_invested)
+
+            val_primary_last = float(y_primary[-1])
+            val_secondary_last = float(y_secondary[-1])
+            inv_last = float(y_invested[-1])
+            x_last_ts = x[-1]
+            x_last_ns = int(dates_ns[k - 1])
+
+            y_min_raw = float(np.nanmin([y_primary.min(), y_secondary.min(), y_invested.min()]))
+            y_max_raw = float(np.nanmax([y_primary.max(), y_secondary.max(), y_invested.max()]))
+            y_range = max(y_max_raw - y_min_raw, 1e-9)
+            y_pad = max(y_range * YPAD_FRAC, 1e-6)
+            y_min_cur = y_min_raw - y_pad
+            y_max_cur = y_max_raw + y_pad
+            ax.set_ylim(y_min_cur, y_max_cur)
+
+            value_primary_dot.set_data([x_last_ts], [val_primary_last])
+            value_secondary_dot.set_data([x_last_ts], [val_secondary_last])
+            invest_dot.set_data([x_last_ts], [inv_last])
+
+            cushion = max(y_range * CUSHION_FRAC, 1e-6)
+            base_positions = {
+                "primary": float(np.clip(val_primary_last, y_min_cur + cushion, y_max_cur - cushion)),
+                "secondary": float(np.clip(val_secondary_last, y_min_cur + cushion, y_max_cur - cushion)),
+                "invested": float(np.clip(inv_last, y_min_cur + cushion, y_max_cur - cushion)),
+            }
+            sorted_items = sorted(base_positions.items(), key=lambda item: item[1])
+            adjusted: List[Tuple[str, float]] = []
+            for key, pos in sorted_items:
+                if adjusted:
+                    prev_pos = adjusted[-1][1]
+                    if pos - prev_pos < cushion:
+                        pos = min(y_max_cur - cushion, prev_pos + cushion)
+                adjusted.append((key, pos))
+            for idx in range(len(adjusted) - 2, -1, -1):
+                key, pos = adjusted[idx]
+                next_pos = adjusted[idx + 1][1]
+                if next_pos - pos < cushion:
+                    pos = max(y_min_cur + cushion, next_pos - cushion)
+                    adjusted[idx] = (key, pos)
+            positions = {key: pos for key, pos in adjusted}
+
+            growth_target_ns = xmin_ns + max(
+                int(0.15 * (xlim_right_ns - xmin_ns)),
+                int((k / frames_total) * (xlim_right_ns - xmin_ns)),
+            )
+            right_margin_ns = max(
+                int(RIGHT_MARGIN_FRAC * (xlim_right_ns - xmin_ns)), RIGHT_MARGIN_MIN_NS
+            )
+            visible_right_ns = min(
+                xlim_right_ns, max(growth_target_ns, x_last_ns + right_margin_ns)
+            )
+            ax.set_xlim(xmin_dt, pd.to_datetime(visible_right_ns, unit="ns"))
+            current_span_ns = max(1, visible_right_ns - xmin_ns)
+            frac = (x_last_ns - xmin_ns) / current_span_ns
+            right_edge_ns = visible_right_ns
+
+            x_follow_ns = min(
+                x_last_ns + follow_xoff_ns, right_edge_ns - int(current_span_ns * 0.01)
+            )
+            x_follow_ts = pd.to_datetime(x_follow_ns, unit="ns")
+
+            primary_text = f"{primary.company}: {format_euro(val_primary_last)}"
+            secondary_text = f"{secondary.company}: {format_euro(val_secondary_last)}"
+            invested_text = f"{lang['label_invested']}: {format_euro(inv_last)}"
+
+            primary_follow.set_text(primary_text)
+            secondary_follow.set_text(secondary_text)
+            invest_follow.set_text(invested_text)
+            primary_pin.set_text(primary_text)
+            secondary_pin.set_text(secondary_text)
+            invest_pin.set_text(invested_text)
+
+            label_follow_map = [
+                (primary_follow, "primary"),
+                (secondary_follow, "secondary"),
+                (invest_follow, "invested"),
+            ]
+            label_pin_map = [
+                (primary_pin, "primary"),
+                (secondary_pin, "secondary"),
+                (invest_pin, "invested"),
+            ]
+
+            if frac < FOLLOW_TO_PIN_FRAC:
+                for label, key in label_follow_map:
+                    label.set_visible(True)
+                    pos = positions.get(key, base_positions[key])
+                    label.set_position((x_follow_ts, pos))
+                    label.set_ha("left")
+                    label.set_va("center")
+                for label, _ in label_pin_map:
+                    label.set_visible(False)
+            else:
+                for label, _ in label_follow_map:
+                    label.set_visible(False)
+                for label, key in label_pin_map:
+                    label.set_visible(True)
+                    pos = positions.get(key, base_positions[key])
+                    label.set_position((LABEL_X_FRAC, pos))
+                    label.set_va("center")
+
+            prog = (x_last_ns - xmin_ns) / denom_ns if denom_ns > 0 else 1.0
+            pbar_fill.set_data([0.0, float(np.clip(prog, 0.0, 1.0))], [0.5, 0.5])
+
+            pl_text.set_text(
+                f"{primary.company}: {format_euro(val_primary_last)} • {secondary.company}: {format_euro(val_secondary_last)}"
+            )
+            if val_primary_last > val_secondary_last:
+                pl_text.set_color(COLOR_PRIMARY)
+            elif val_secondary_last > val_primary_last:
+                pl_text.set_color(COLOR_SECONDARY)
+            else:
+                pl_text.set_color("#9FB3C8")
+
+            end_bg.set_alpha(0.0)
+            end_title.set_alpha(0.0)
+            end_handle.set_alpha(0.0)
+
+            return (
+                value_primary_line,
+                value_secondary_line,
+                invest_line,
+                value_primary_dot,
+                value_secondary_dot,
+                invest_dot,
+                pbar_fill,
+                pl_text,
+                end_bg,
+                end_title,
+                end_handle,
+                primary_follow,
+                secondary_follow,
+                invest_follow,
+                primary_pin,
+                secondary_pin,
+                invest_pin,
+            )
+        else:
+            end_bg.set_alpha(1.0)
+            end_title.set_alpha(1.0)
+            end_handle.set_alpha(1.0)
+            return (end_bg, end_title, end_handle)
+
+    ani = animation.FuncAnimation(
+        fig, update, frames=frames, init_func=init, blit=False, interval=1000 / fps
+    )
+
+    if not str(outfile).lower().endswith(".mp4"):
+        outfile = str(outfile) + ".mp4"
+    if shutil.which("ffmpeg") is None:
+        plt.close(fig)
+        raise RuntimeError(lang["err_writer"])
+
+    writer = FFMpegWriter(
+        fps=fps, codec="libx264", bitrate=8000, extra_args=["-pix_fmt", "yuv420p"]
+    )
+    ani.save(outfile, writer=writer, dpi=dpi)
+    plt.close(fig)
+
 # ---------------------------
 # Portfolio series
 # ---------------------------
@@ -290,7 +810,6 @@ def make_animation(
     from matplotlib.animation import FFMpegWriter
     from matplotlib.ticker import FuncFormatter
     from matplotlib.transforms import blended_transform_factory
-    from matplotlib.patches import Rectangle
     import matplotlib.dates as mdates
     try:
         from PIL import Image
