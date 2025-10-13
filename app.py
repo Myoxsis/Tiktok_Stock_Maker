@@ -24,8 +24,8 @@ from tiktok_stock_animator_5 import (
     get_lang,
     load_prices,
     make_animation,
-    series_dca,
-    series_fixed_investment,
+    make_comparison_animation,
+    prepare_portfolio,
 )
 
 DATA_DIR = Path("data")
@@ -98,41 +98,43 @@ def _generate_video(
     if data.empty:
         raise ValueError("No price data available inside the selected date range.")
 
-    if mode == "fixed":
-        snapshots, vis_dates, vis_close, start_used = series_fixed_investment(
-            data, start_dt, amount
-        )
-        title = lang["title_fixed"].format(company=company)
-        subtitle = lang["subtitle_fixed"].format(
-            amount=_format_currency(amount, lang_code),
-            date=start_used.date(),
-        )
-        outfile = f"{company.replace(' ', '_')}_fixed_{start_used.date()}"
-    else:
-        if freq is None:
-            raise ValueError("Choose a dollar-cost averaging frequency.")
-        snapshots, vis_dates, vis_close, start_used = series_dca(
-            data, start_dt, amount, freq, end_dt
-        )
-        freq_disp = display_freq(lang, freq)
-        title = lang["title_dca"].format(company=company, freq_disp=freq_disp)
-        subtitle = lang["subtitle_dca"].format(
-            amount=_format_currency(amount, lang_code),
-            freq=display_freq_inline(lang, freq),
-            date=start_used.date(),
-        )
-        outfile = f"{company.replace(' ', '_')}_dca_{freq}_{start_used.date()}"
+    portfolio = prepare_portfolio(
+        data,
+        company,
+        mode,
+        start_dt,
+        amount,
+        freq=freq,
+        end_date=end_dt,
+    )
 
-    if len(vis_dates) == 0:
+    if len(portfolio.vis_dates) == 0:
         raise ValueError(lang["no_frames"])
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmpfile:
         output_path = Path(tmpfile.name)
 
+    if mode == "fixed":
+        title = lang["title_fixed"].format(company=company)
+        subtitle = lang["subtitle_fixed"].format(
+            amount=_format_currency(amount, lang_code),
+            date=portfolio.start_used.date(),
+        )
+    else:
+        if freq is None:
+            raise ValueError("Choose a dollar-cost averaging frequency.")
+        freq_disp = display_freq(lang, freq)
+        subtitle = lang["subtitle_dca"].format(
+            amount=_format_currency(amount, lang_code),
+            freq=display_freq_inline(lang, freq),
+            date=portfolio.start_used.date(),
+        )
+        title = lang["title_dca"].format(company=company, freq_disp=freq_disp)
+
     make_animation(
-        vis_dates,
-        vis_close,
-        snapshots,
+        portfolio.vis_dates,
+        portfolio.vis_close,
+        portfolio.snapshots,
         title,
         subtitle,
         output_path,
@@ -143,7 +145,97 @@ def _generate_video(
         reveal_sec=reveal_duration,
         freeze_hold_sec=freeze_sec,
     )
-    return output_path, start_used
+    return output_path, portfolio.start_used
+
+
+def _generate_comparison_video(
+    primary_prices: pd.DataFrame,
+    secondary_prices: pd.DataFrame,
+    primary_name: str,
+    secondary_name: str,
+    mode: str,
+    start_dt: datetime,
+    end_dt: Optional[datetime],
+    amount: float,
+    freq: Optional[str],
+    fps: int,
+    speed: float,
+    freeze_sec: float,
+    lang_code: str,
+    reveal_duration: float,
+) -> Tuple[Path, pd.Timestamp, pd.Timestamp, pd.Timestamp]:
+    lang = get_lang(lang_code)
+
+    if mode == "dca" and not freq:
+        raise ValueError("Choose a dollar-cost averaging frequency.")
+
+    primary_data = primary_prices.copy()
+    secondary_data = secondary_prices.copy()
+    if end_dt is not None:
+        cutoff = pd.Timestamp(end_dt)
+        primary_data = primary_data[primary_data["date"] <= cutoff]
+        secondary_data = secondary_data[secondary_data["date"] <= cutoff]
+    if primary_data.empty or secondary_data.empty:
+        raise ValueError(
+            "No price data available inside the selected date range for one of the tickers."
+        )
+
+    primary_series = prepare_portfolio(
+        primary_data,
+        primary_name,
+        mode,
+        start_dt,
+        amount,
+        freq=freq,
+        end_date=end_dt,
+    )
+    secondary_series = prepare_portfolio(
+        secondary_data,
+        secondary_name,
+        mode,
+        start_dt,
+        amount,
+        freq=freq,
+        end_date=end_dt,
+    )
+
+    combined_start = max(primary_series.start_used, secondary_series.start_used)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmpfile:
+        output_path = Path(tmpfile.name)
+
+    title_company = f"{primary_name} vs {secondary_name}".strip()
+    if mode == "fixed":
+        title = lang["title_fixed"].format(company=title_company)
+        subtitle = lang["subtitle_fixed"].format(
+            amount=_format_currency(amount, lang_code),
+            date=combined_start.date(),
+        )
+    else:
+        assert freq is not None
+        freq_disp = display_freq(lang, freq)
+        title = lang["title_dca"].format(company=title_company, freq_disp=freq_disp)
+        subtitle = lang["subtitle_dca"].format(
+            amount=_format_currency(amount, lang_code),
+            freq=display_freq_inline(lang, freq),
+            date=combined_start.date(),
+        )
+
+    make_comparison_animation(
+        primary_series,
+        secondary_series,
+        title,
+        subtitle,
+        output_path,
+        fps=fps,
+        speed=speed,
+        dpi=100,
+        lang=lang,
+        reveal_sec=reveal_duration,
+        freeze_hold_sec=freeze_sec,
+    )
+
+    return output_path, combined_start, primary_series.start_used, secondary_series.start_used
 
 
 def main() -> None:
@@ -301,7 +393,9 @@ def main() -> None:
     reveal_duration = duration_options[duration_choice]
     lang_code = st.sidebar.selectbox("Language", options=["en", "fr"], index=0)
 
-    generate_label = "Generate videos" if mode == "compare" else "Generate video"
+    generate_label = (
+        "Generate comparison video" if mode == "compare" else "Generate video"
+    )
     generate_btn = st.sidebar.button(generate_label, type="primary")
 
     if prices is not None and not prices.empty:
@@ -335,24 +429,17 @@ def main() -> None:
                 try:
                     if mode == "compare":
                         comparison_name = company_compare or "Ticker 2"
-                        with st.spinner("Rendering comparison videos..."):
-                            video_primary, start_used_primary = _generate_video(
-                                prices,
-                                company or "Ticker 1",
-                                investment_mode,
-                                start_dt,
-                                end_dt,
-                                amount,
-                                freq,
-                                fps,
-                                speed,
-                                freeze_sec,
-                                lang_code,
-                                reveal_duration,
-                            )
+                        with st.spinner("Rendering comparison video..."):
                             assert comparison_prices is not None
-                            video_secondary, start_used_secondary = _generate_video(
+                            (
+                                video_path,
+                                combined_start,
+                                start_used_primary,
+                                start_used_secondary,
+                            ) = _generate_comparison_video(
+                                prices,
                                 comparison_prices,
+                                company or "Ticker 1",
                                 comparison_name,
                                 investment_mode,
                                 start_dt,
@@ -366,28 +453,33 @@ def main() -> None:
                                 reveal_duration,
                             )
 
-                        st.success("Videos created for both tickers.")
-                        col_primary, col_secondary = st.columns(2)
-                        ticker_entries = [
-                            (col_primary, company or "Ticker 1", video_primary, start_used_primary),
-                            (col_secondary, comparison_name, video_secondary, start_used_secondary),
+                        st.success("Comparison video created.")
+                        caption_lines = [
+                            f"Combined start date used: {combined_start.date().isoformat()}",
+                            f"{(company or 'Ticker 1')} data available from: {start_used_primary.date().isoformat()}",
+                            f"{comparison_name} data available from: {start_used_secondary.date().isoformat()}",
                         ]
-                        for column, name, path, start_used_val in ticker_entries:
-                            download_filename = (
-                                f"{_slugify_name(name)}_{investment_mode}_{start_used_val.date().isoformat()}.mp4"
+                        st.caption("\n".join(caption_lines))
+                        st.video(str(video_path))
+
+                        slug_primary = _slugify_name(company or "Ticker 1")
+                        slug_secondary = _slugify_name(comparison_name)
+                        mode_suffix = investment_mode
+                        if investment_mode == "dca" and freq:
+                            mode_suffix = f"{investment_mode}_{freq}"
+                        download_filename = (
+                            f"{slug_primary}_vs_{slug_secondary}_{mode_suffix}_{combined_start.date().isoformat()}.mp4"
+                        )
+                        download_label = (
+                            f"Download {company or 'Ticker 1'} vs {comparison_name}"
+                        )
+                        with video_path.open("rb") as video_file:
+                            st.download_button(
+                                download_label,
+                                data=video_file.read(),
+                                file_name=download_filename,
+                                mime="video/mp4",
                             )
-                            with column:
-                                st.markdown(f"**{name}**")
-                                st.caption(
-                                    f"Start date used: {start_used_val.date().isoformat()}"
-                                )
-                                st.video(str(path))
-                                st.download_button(
-                                    f"Download {name}",
-                                    data=path.read_bytes(),
-                                    file_name=download_filename,
-                                    mime="video/mp4",
-                                )
                     else:
                         with st.spinner("Rendering video..."):
                             video_path, start_used = _generate_video(
