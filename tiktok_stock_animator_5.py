@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.animation import FFMpegWriter
 from matplotlib.patches import Rectangle
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FuncFormatter, NullLocator
 from matplotlib.transforms import blended_transform_factory
 import matplotlib.dates as mdates
 
@@ -357,25 +357,24 @@ def make_comparison_animation(
     ax.set_ylabel("€", color="#D8E1E8", fontsize=14)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{int(round(y))}€"))
 
-    span_days = max(1, int((xlim_right - xmin_dt).days))
+    date_index = pd.DatetimeIndex(dates)
+    span_years = date_index[-1].year - date_index[0].year + 1
     target_ticks = 7
-    if span_days <= 40:
-        interval = max(1, int(np.ceil(span_days / target_ticks)))
-        major_locator = mdates.DayLocator(interval=interval)
-        major_fmt = mdates.DateFormatter('%d %b')
-        minor_locator = mdates.DayLocator(interval=max(1, interval // 2))
-    elif span_days <= 370:
-        span_months = max(1, int(np.ceil(span_days / 30.44)))
+    if span_years <= 1:
+        first_month = date_index[0].to_period("M")
+        last_month = date_index[-1].to_period("M")
+        span_months = int(last_month - first_month) + 1
+        span_months = max(span_months, 1)
         interval = max(1, int(np.ceil(span_months / target_ticks)))
         major_locator = mdates.MonthLocator(interval=interval)
-        major_fmt = mdates.DateFormatter('%b %Y')
-        minor_locator = mdates.MonthLocator(interval=max(1, interval // 2))
+        major_fmt = mdates.DateFormatter('%b')
+        minor_locator = mdates.DayLocator(interval=7)
     else:
-        span_years = max(1, int(np.ceil(span_days / 365.25)))
+        span_years = max(span_years, 1)
         interval = max(1, int(np.ceil(span_years / target_ticks)))
         major_locator = mdates.YearLocator(base=interval)
         major_fmt = mdates.DateFormatter('%Y')
-        minor_locator = mdates.MonthLocator(bymonth=(1, 7))
+        minor_locator = NullLocator()
     ax.xaxis.set_major_locator(major_locator)
     ax.xaxis.set_major_formatter(major_fmt)
     ax.xaxis.set_minor_locator(minor_locator)
@@ -932,25 +931,24 @@ def make_animation(
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{int(round(y))}€"))
 
     # Readable X-axis ticks/labels
-    span_days = max(1, int((xlim_right - xmin_dt).days))
+    date_index = pd.DatetimeIndex(dates)
+    span_years = date_index[-1].year - date_index[0].year + 1
     target_ticks = 7
-    if span_days <= 40:
-        interval = max(1, int(np.ceil(span_days / target_ticks)))
-        major_locator = mdates.DayLocator(interval=interval)
-        major_fmt     = mdates.DateFormatter('%d %b')
-        minor_locator = mdates.DayLocator(interval=max(1, interval // 2))
-    elif span_days <= 370:
-        span_months = max(1, int(np.ceil(span_days / 30.44)))
+    if span_years <= 1:
+        first_month = date_index[0].to_period("M")
+        last_month = date_index[-1].to_period("M")
+        span_months = int(last_month - first_month) + 1
+        span_months = max(span_months, 1)
         interval = max(1, int(np.ceil(span_months / target_ticks)))
         major_locator = mdates.MonthLocator(interval=interval)
-        major_fmt     = mdates.DateFormatter('%b %Y')
-        minor_locator = mdates.MonthLocator(interval=max(1, interval // 2))
+        major_fmt = mdates.DateFormatter('%b')
+        minor_locator = mdates.DayLocator(interval=7)
     else:
-        span_years  = max(1, int(np.ceil(span_days / 365.25)))
-        interval    = max(1, int(np.ceil(span_years / target_ticks)))
+        span_years = max(span_years, 1)
+        interval = max(1, int(np.ceil(span_years / target_ticks)))
         major_locator = mdates.YearLocator(base=interval)
-        major_fmt     = mdates.DateFormatter('%Y')
-        minor_locator = mdates.MonthLocator(bymonth=(1, 7))
+        major_fmt = mdates.DateFormatter('%Y')
+        minor_locator = NullLocator()
     ax.xaxis.set_major_locator(major_locator)
     ax.xaxis.set_major_formatter(major_fmt)
     ax.xaxis.set_minor_locator(minor_locator)
